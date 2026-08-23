@@ -29,6 +29,9 @@ func Render(imagePath string, width, height int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("decode: %w", err)
 	}
+	if src.Bounds().Dx() == 0 || src.Bounds().Dy() == 0 {
+		return "", fmt.Errorf("image has empty bounds")
+	}
 
 	// Each terminal row covers 2 pixel rows via the ▀ half-block trick
 	px := resizeBilinear(src, width, height*2)
@@ -47,13 +50,16 @@ func Render(imagePath string, width, height int) (string, error) {
 		}
 		sb.WriteString("\x1b[0m\n")
 	}
-	return strings.TrimRight(sb.String(), "\n"), nil
+	return strings.TrimSuffix(sb.String(), "\n"), nil
 }
 
 // resizeBilinear scales src to w×h using bilinear interpolation.
 // Produces significantly smoother results than nearest-neighbour when downscaling.
 func resizeBilinear(src image.Image, w, h int) *image.NRGBA {
 	b := src.Bounds()
+	if b.Dx() == 0 || b.Dy() == 0 || w <= 0 || h <= 0 {
+		return image.NewNRGBA(image.Rect(0, 0, w, h))
+	}
 	sw := float64(b.Dx())
 	sh := float64(b.Dy())
 	dst := image.NewNRGBA(image.Rect(0, 0, w, h))

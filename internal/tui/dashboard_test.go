@@ -126,6 +126,18 @@ func withStubbedMusic(t *testing.T) *[]string {
 			calls = append(calls, "play-track:"+name)
 			return nil
 		},
+		GetRecentlyPlayed: func(limit int) ([]music.TrackInfo, error) {
+			calls = append(calls, "recent")
+			return []music.TrackInfo{{Title: "Recent1", Artist: "Artist1"}, {Title: "Recent2", Artist: "Artist2"}}, nil
+		},
+		GetTopTracks: func(limit int) ([]music.TrackStats, error) {
+			calls = append(calls, "top")
+			return []music.TrackStats{{Title: "Top1", Artist: "A1", PlayCount: 10}, {Title: "Top2", Artist: "A2", PlayCount: 5}}, nil
+		},
+		GetLibraryStats: func() (*music.LibraryStats, error) {
+			calls = append(calls, "libstats")
+			return &music.LibraryStats{TotalTracks: 100, TotalPlaylists: 10, MostPlayedGenre: "Rock", TopArtist: "Artist1", TotalPlayCount: 500}, nil
+		},
 	}
 	t.Cleanup(func() { musicAPI = original })
 	return &calls
@@ -383,7 +395,7 @@ func TestEscapeReturnsToExpectedStates(t *testing.T) {
 		t.Fatalf("state = %v, want statePlaylists", m.state)
 	}
 
-	for _, state := range []menuState{statePlaylists, stateSearchInput, stateSearchResults, stateLyrics, stateQueue} {
+	for _, state := range []menuState{statePlaylists, stateSearchInput, stateSearchResults, stateLyrics, stateQueue, stateHistory} {
 		m = initialModel()
 		m.state = state
 		m, _ = press(m, "esc")
@@ -718,5 +730,72 @@ func TestAlbumArtSizeScalesWithCardWidth(t *testing.T) {
 				t.Fatalf("albumArtSize(%d) = %dx%d, want %dx%d", tt.width, gotW, gotH, tt.wantW, tt.wantH)
 			}
 		})
+	}
+}
+
+func TestHistoryMenuSelectEntersStateHistory(t *testing.T) {
+	withStubbedMusic(t)
+	m := initialModel()
+	m.activeColumn = 0
+	m.activeRow = 4 // "History & Stats"
+
+	m, _ = press(m, "enter")
+	if m.state != stateHistory {
+		t.Fatalf("state = %v, want stateHistory", m.state)
+	}
+	if !m.historyLoading {
+		t.Fatal("historyLoading should be true after entering history state")
+	}
+}
+
+func TestFetchHistoryCmdReturnsExpectedMessages(t *testing.T) {
+	withStubbedMusic(t)
+
+	msg := fetchHistoryCmd()().(historyMsg)
+	if len(msg.recentTracks) != 2 {
+		t.Fatalf("fetchHistoryCmd().recentTracks = %d, want 2", len(msg.recentTracks))
+	}
+	if len(msg.topTracks) != 2 {
+		t.Fatalf("fetchHistoryCmd().topTracks = %d, want 2", len(msg.topTracks))
+	}
+	if msg.libraryStats == nil {
+		t.Fatal("fetchHistoryCmd().libraryStats is nil")
+	}
+	if msg.libraryStats.TotalTracks != 100 {
+		t.Fatalf("fetchHistoryCmd().libraryStats.TotalTracks = %d, want 100", msg.libraryStats.TotalTracks)
+	}
+}
+
+func TestRenderHistoryLoading(t *testing.T) {
+	m := initialModel()
+	m.state = stateHistory
+	m.historyLoading = true
+	got := m.renderHistory(60)
+	if !strings.Contains(got, "Loading history") {
+		t.Fatalf("renderHistory(loading) = %q, want loading message", got)
+	}
+}
+
+func TestRenderHistoryWithData(t *testing.T) {
+	m := initialModel()
+	m.state = stateHistory
+	m.historyRecentTracks = []music.TrackInfo{{Title: "Song1", Artist: "Art1"}, {Title: "Song2", Artist: "Art2"}}
+	m.historyTopTracks = []music.TrackStats{{Title: "Top1", Artist: "A1", PlayCount: 10}, {Title: "Top2", Artist: "A2", PlayCount: 5}}
+	m.historyLibraryStats = &music.LibraryStats{TotalTracks: 100, TotalPlaylists: 10, MostPlayedGenre: "Rock", TopArtist: "Artist1", TotalPlayCount: 500}
+	got := m.renderHistory(80)
+	if !strings.Contains(got, "LIBRARY OVERVIEW") {
+		t.Fatalf("renderHistory should contain LIBRARY OVERVIEW, got %q", got)
+	}
+	if !strings.Contains(got, "Total Tracks:") {
+		t.Fatalf("renderHistory should contain Total Tracks, got %q", got)
+	}
+	if !strings.Contains(got, "RECENTLY PLAYED") {
+		t.Fatalf("renderHistory should contain RECENTLY PLAYED, got %q", got)
+	}
+	if !strings.Contains(got, "TOP TRACKS") {
+		t.Fatalf("renderHistory should contain TOP TRACKS, got %q", got)
+	}
+	if !strings.Contains(got, "10 plays") {
+		t.Fatalf("renderHistory should contain play counts, got %q", got)
 	}
 }

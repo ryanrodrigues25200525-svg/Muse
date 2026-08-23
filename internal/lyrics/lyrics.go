@@ -69,21 +69,44 @@ func Fetch(title, artist, album string, duration float64) ([]Line, error) {
 	return nil, nil
 }
 
-// lrcRe matches lines like: [02:14.53] Some lyric text
-var lrcRe = regexp.MustCompile(`^\[(\d+):(\d+)\.(\d+)\]\s*(.*)$`)
+// lrcRe matches a single timestamp like [02:14.53] or [02:14.531]
+var lrcRe = regexp.MustCompile(`\[(\d+):(\d+)\.(\d+)\]`)
 
 func parseLRC(raw string) []Line {
 	var lines []Line
 	for _, l := range strings.Split(raw, "\n") {
-		m := lrcRe.FindStringSubmatch(strings.TrimSpace(l))
-		if m == nil {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" {
 			continue
 		}
-		min, _ := strconv.ParseFloat(m[1], 64)
-		sec, _ := strconv.ParseFloat(m[2], 64)
-		cs, _ := strconv.ParseFloat(m[3], 64)
-		t := min*60 + sec + cs/100
-		lines = append(lines, Line{Time: t, Text: m[4]})
+		matches := lrcRe.FindAllStringSubmatch(trimmed, -1)
+		if len(matches) == 0 {
+			continue
+		}
+		// Text is the content after the last ] — strip all leading timestamps.
+		text := lrcRe.ReplaceAllString(trimmed, "")
+		text = strings.TrimSpace(text)
+		for _, m := range matches {
+			min, _ := strconv.ParseFloat(m[1], 64)
+			sec, _ := strconv.ParseFloat(m[2], 64)
+			fracStr := m[3]
+			frac, _ := strconv.ParseFloat(fracStr, 64)
+			// Fractional part may be centiseconds (2 digits) or milliseconds (3 digits).
+			// Divide by 10^len(fracStr) so both [00:10.50] (50/100=0.5) and
+			// [00:10.123] (123/1000=0.123) are correct.
+			div := 100.0
+			if len(fracStr) == 3 {
+				div = 1000.0
+			} else if len(fracStr) != 2 {
+				// Generic fallback for unexpected lengths (1 or >3 digits).
+				div = 1
+				for i := 0; i < len(fracStr); i++ {
+					div *= 10
+				}
+			}
+			t := min*60 + sec + frac/div
+			lines = append(lines, Line{Time: t, Text: text})
+		}
 	}
 	sort.Slice(lines, func(i, j int) bool { return lines[i].Time < lines[j].Time })
 	return lines
@@ -98,8 +121,16 @@ func parsePlain(raw string) []Line {
 }
 
 // IsSynced reports whether the lines have timestamps (LRC format).
+// A file is considered synced if any line has a non-zero timestamp —
+// checking only the last line fails when the final entry is an empty
+// trailing line with Time==0.
 func IsSynced(lines []Line) bool {
-	return len(lines) > 0 && lines[len(lines)-1].Time > 0
+	for _, l := range lines {
+		if l.Time > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ActiveIndex returns the index of the currently playing lyric line.

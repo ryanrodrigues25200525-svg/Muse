@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -46,6 +48,12 @@ type queueMsg struct {
 	tracks []music.TrackInfo
 	err    error
 }
+type historyMsg struct {
+	recentTracks []music.TrackInfo
+	topTracks    []music.TrackStats
+	libraryStats *music.LibraryStats
+	err          error
+}
 type artMsg struct {
 	rendered string
 	width    int
@@ -81,6 +89,8 @@ var (
 
 	normalStyle = lipgloss.NewStyle().Foreground(textColor).Padding(0, 1)
 	helpStyle   = lipgloss.NewStyle().Foreground(subtleColor).MarginTop(1)
+
+	themeMu sync.Mutex
 )
 
 type uiTheme struct {
@@ -108,6 +118,8 @@ var discoThemes = []uiTheme{
 }
 
 func applyTheme(theme uiTheme) {
+	themeMu.Lock()
+	defer themeMu.Unlock()
 	accentColor = theme.accent
 	subtleColor = theme.subtle
 	cardBgColor = theme.cardBg
@@ -154,6 +166,9 @@ type musicActions struct {
 	PlayPlaylistShuffledByPersistentID     func(string) error
 	PlayPlaylistTrackAtIndexByPersistentID func(string, int) error
 	PlayTrackByName                        func(string) error
+	GetRecentlyPlayed                      func(int) ([]music.TrackInfo, error)
+	GetTopTracks                           func(int) ([]music.TrackStats, error)
+	GetLibraryStats                        func() (*music.LibraryStats, error)
 }
 
 var musicAPI = musicActions{
@@ -178,6 +193,9 @@ var musicAPI = musicActions{
 	PlayPlaylistShuffledByPersistentID:     music.PlayPlaylistShuffledByPersistentID,
 	PlayPlaylistTrackAtIndexByPersistentID: music.PlayPlaylistTrackAtIndexByPersistentID,
 	PlayTrackByName:                        music.PlayTrackByName,
+	GetRecentlyPlayed:                      music.GetRecentlyPlayed,
+	GetTopTracks:                           music.GetTopTracks,
+	GetLibraryStats:                        music.GetLibraryStats,
 }
 
 // ── State machine ─────────────────────────────────────────────────────────────
@@ -192,6 +210,7 @@ const (
 	stateSearchResults
 	stateLyrics
 	stateQueue
+	stateHistory
 )
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -233,6 +252,12 @@ type model struct {
 	artWidth       int
 	artHeight      int
 	lastTrackTitle string
+	// History & Stats
+	historyRecentTracks []music.TrackInfo
+	historyTopTracks    []music.TrackStats
+	historyLibraryStats *music.LibraryStats
+	historyLoading      bool
+	historyError        string
 	// Window
 	width  int
 	height int
@@ -300,6 +325,24 @@ func fetchQueueCmd() tea.Cmd {
 	}
 }
 
+func fetchHistoryCmd() tea.Cmd {
+	return func() tea.Msg {
+		recent, err1 := musicAPI.GetRecentlyPlayed(25)
+		top, err2 := musicAPI.GetTopTracks(15)
+		stats, err3 := musicAPI.GetLibraryStats()
+		if err1 != nil {
+			return historyMsg{err: err1}
+		}
+		if err2 != nil {
+			return historyMsg{err: err2}
+		}
+		if err3 != nil {
+			return historyMsg{err: err3}
+		}
+		return historyMsg{recentTracks: recent, topTracks: top, libraryStats: stats}
+	}
+}
+
 func fetchArtCmd(width, height int) tea.Cmd {
 	return func() tea.Msg {
 		path, err := musicAPI.GetArtworkPath()
@@ -307,6 +350,10 @@ func fetchArtCmd(width, height int) tea.Cmd {
 			return artMsg{}
 		}
 		rendered, err := art.Render(path, width, height)
+		// Clean up the temp file created by mktemp (best-effort).
+		if path != "" && path != "/tmp/muse_art.jpg" {
+			_ = os.Remove(path)
+		}
 		if err != nil {
 			return artMsg{}
 		}
@@ -316,8 +363,15 @@ func fetchArtCmd(width, height int) tea.Cmd {
 
 func sendNotificationCmd(title, artist string) tea.Cmd {
 	return func() tea.Msg {
-		safeTitle := strings.ReplaceAll(title, `"`, "'")
-		safeArtist := strings.ReplaceAll(artist, `"`, "'")
+		escapeNotif := func(s string) string {
+			s = strings.ReplaceAll(s, "\\", "\\\\")
+			s = strings.ReplaceAll(s, "\"", "\\\"")
+			s = strings.ReplaceAll(s, "\n", " ")
+			s = strings.ReplaceAll(s, "\r", " ")
+			return s
+		}
+		safeTitle := escapeNotif(title)
+		safeArtist := escapeNotif(artist)
 		script := fmt.Sprintf(`display notification "%s" with title "♫ Now Playing" subtitle "%s"`, safeTitle, safeArtist)
 		musicAPI.RunAppleScript(script)
 		return noopMsg{}
@@ -355,7 +409,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = statePlaylists
 				m.errorMsg = ""
 				return m, nil
-			case statePlaylists, stateSearchInput, stateSearchResults, stateLyrics, stateQueue:
+			case statePlaylists, stateSearchInput, stateSearchResults, stateLyrics, stateQueue, stateHistory:
 				m.state = stateMainMenu
 				m.errorMsg = ""
 				return m, nil
@@ -576,6 +630,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.updateStatusCmd()
 				}
 			}
+
+		case stateHistory:
+			// history view is read-only; no cursor interaction needed
 		}
 
 	// ── Data messages ────────────────────────────────────────────────────────
@@ -584,9 +641,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.errorMsg = msg.err.Error()
 		} else {
-			if msg.info != nil && msg.info.Title != "" && msg.info.Title != m.lastTrackTitle {
+			trackKey := ""
+			if msg.info != nil {
+				trackKey = msg.info.Title + "\x1f" + msg.info.Artist + "\x1f" + msg.info.Album
+			}
+			lastKey := m.lastTrackTitle
+			// Backward-compat: early builds stored only title in lastTrackTitle.
+			// Treat a bare-title key as matching if the current track's title matches.
+			isSameTrack := trackKey != "" && (trackKey == lastKey || (msg.info != nil && msg.info.Title == lastKey))
+			if msg.info != nil && msg.info.Title != "" && !isSameTrack {
 				// Track changed — fetch new art, notify, clear stale lyrics
-				m.lastTrackTitle = msg.info.Title
+				m.lastTrackTitle = trackKey
 				m.artRendered = ""
 				m.artWidth = 0
 				m.artHeight = 0
@@ -663,6 +728,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.queueTracks = msg.tracks
 			m.queueIndex = 0
+		}
+
+	case historyMsg:
+		m.historyLoading = false
+		if msg.err != nil {
+			m.historyError = msg.err.Error()
+		} else {
+			m.historyRecentTracks = msg.recentTracks
+			m.historyTopTracks = msg.topTracks
+			m.historyLibraryStats = msg.libraryStats
+			m.historyError = ""
 		}
 
 	case artMsg:
@@ -758,7 +834,7 @@ func (m model) playPreviousTrack() (tea.Model, tea.Cmd) {
 // menuColumns defines the main menu grid.
 func menuColumns() [][]string {
 	return [][]string{
-		{"Library Playlists", "Search Library", "Lyrics", "Up Next"},
+		{"Library Playlists", "Search Library", "Lyrics", "Up Next", "History & Stats"},
 		{"Play", "Pause", "Next", "Previous"},
 	}
 }
@@ -786,6 +862,14 @@ func (m model) handleMenuSelect(item string) (tea.Model, tea.Cmd) {
 		m.queueLoading = true
 		m.queueTracks = nil
 		return m, fetchQueueCmd()
+	case "History & Stats":
+		m.state = stateHistory
+		m.historyLoading = true
+		m.historyRecentTracks = nil
+		m.historyTopTracks = nil
+		m.historyLibraryStats = nil
+		m.historyError = ""
+		return m, fetchHistoryCmd()
 	case "Play":
 		return m.withControlError(musicAPI.Play())
 	case "Pause":
@@ -811,11 +895,18 @@ func (m model) cardWidth() int {
 	cardWidth := 60
 	if m.width > 0 {
 		cardWidth = m.width - 6
-		if cardWidth < 50 {
-			cardWidth = 50
+		if cardWidth < 30 {
+			cardWidth = 30
 		}
 		if cardWidth > 112 {
 			cardWidth = 112
+		}
+		// Never exceed the available width.
+		if cardWidth > m.width-2 {
+			cardWidth = m.width - 2
+			if cardWidth < 30 {
+				cardWidth = 30
+			}
 		}
 	}
 	return cardWidth
@@ -877,6 +968,8 @@ func (m model) View() string {
 		s.WriteString(m.renderLyrics(cardWidth))
 	case stateQueue:
 		s.WriteString(m.renderQueue(cardWidth))
+	case stateHistory:
+		s.WriteString(m.renderHistory(cardWidth))
 	}
 
 	s.WriteString("\n")
@@ -1052,6 +1145,7 @@ func (m model) renderMainMenu(cardWidth int) string {
 		"Search Library":    "🔍",
 		"Lyrics":            "🎵",
 		"Up Next":           "⏭",
+		"History & Stats":   "📊",
 		"Play":              "▶ ",
 		"Pause":             "⏸ ",
 		"Next":              "→ ",
@@ -1238,13 +1332,36 @@ func (m model) renderSearchResults(cardWidth int) string {
 		sb.WriteString(normalStyle.Render("  No tracks found.") + "\n")
 	} else {
 		header = fmt.Sprintf("🔍 %d RESULT(S)  (Esc to go back)", len(m.searchResults))
-		for i, t := range m.searchResults {
-			line := fmt.Sprintf("%s — %s  (%s)", t.Title, t.Artist, t.Album)
+		const maxVisible = 14
+		cur := m.searchIndex
+		start := cur - maxVisible/2
+		if start < 0 {
+			start = 0
+		}
+		end := start + maxVisible
+		if end > len(m.searchResults) {
+			end = len(m.searchResults)
+			start = end - maxVisible
+			if start < 0 {
+				start = 0
+			}
+		}
+		if start > 0 {
+			sb.WriteString(lipgloss.NewStyle().Foreground(subtleColor).Render(
+				fmt.Sprintf("  \xe2\x86\x91 %d more above", start)) + "\n")
+		}
+		for i := start; i < end; i++ {
+			t := m.searchResults[i]
+			line := fmt.Sprintf("%s \xe2\x80\x94 %s  (%s)", t.Title, t.Artist, t.Album)
 			if i == m.searchIndex {
 				sb.WriteString(highlightStyle.Render("> "+line) + "\n")
 			} else {
 				sb.WriteString(normalStyle.Render("  "+line) + "\n")
 			}
+		}
+		if end < len(m.searchResults) {
+			sb.WriteString(lipgloss.NewStyle().Foreground(subtleColor).Render(
+				fmt.Sprintf("  \xe2\x86\x93 %d more below", len(m.searchResults)-end)) + "\n")
 		}
 	}
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(accentColor).
@@ -1325,6 +1442,72 @@ func (m model) renderQueue(cardWidth int) string {
 	}
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(accentColor).
 		Padding(0, 1).Width(cardWidth).Render("⏩ UP NEXT  (Enter to play  ·  Esc to go back)\n\n" + sb.String())
+	return box + "\n"
+}
+
+func (m model) renderHistory(cardWidth int) string {
+	var sb strings.Builder
+	if m.historyLoading {
+		sb.WriteString(helpStyle.Render("  Loading history & stats...") + "\n")
+		box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(accentColor).
+			Padding(0, 1).Width(cardWidth).Render("📊 HISTORY & STATS  (Esc to go back)\n\n" + sb.String())
+		return box + "\n"
+	}
+	if m.historyError != "" {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#FF3B30")).Render("  ✕  "+m.historyError) + "\n")
+		box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(accentColor).
+			Padding(0, 1).Width(cardWidth).Render("📊 HISTORY & STATS  (Esc to go back)\n\n" + sb.String())
+		return box + "\n"
+	}
+
+	sectionHeader := lipgloss.NewStyle().Foreground(accentColor).Bold(true)
+	dim := lipgloss.NewStyle().Foreground(subtleColor)
+
+	// Library stats section
+	if m.historyLibraryStats != nil {
+		stats := m.historyLibraryStats
+		sb.WriteString(sectionHeader.Render("  LIBRARY OVERVIEW") + "\n")
+		sb.WriteString(dim.Render("  ─────────────────────────────────────────") + "\n")
+		sb.WriteString(fmt.Sprintf("  Total Tracks:     %d\n", stats.TotalTracks))
+		sb.WriteString(fmt.Sprintf("  Total Playlists:  %d\n", stats.TotalPlaylists))
+		sb.WriteString(fmt.Sprintf("  Total Plays:      %d\n", stats.TotalPlayCount))
+		if stats.MostPlayedGenre != "" {
+			sb.WriteString(fmt.Sprintf("  Top Genre:        %s\n", stats.MostPlayedGenre))
+		}
+		if stats.TopArtist != "" {
+			sb.WriteString(fmt.Sprintf("  Top Artist:       %s\n", stats.TopArtist))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Recently played section
+	if len(m.historyRecentTracks) > 0 {
+		sb.WriteString(sectionHeader.Render("  RECENTLY PLAYED") + "\n")
+		sb.WriteString(dim.Render("  ─────────────────────────────────────────") + "\n")
+		for i, t := range m.historyRecentTracks {
+			if i >= 10 {
+				break
+			}
+			sb.WriteString(fmt.Sprintf("  %s — %s\n", t.Title, t.Artist))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Top tracks section
+	if len(m.historyTopTracks) > 0 {
+		sb.WriteString(sectionHeader.Render("  TOP TRACKS (by play count)") + "\n")
+		sb.WriteString(dim.Render("  ─────────────────────────────────────────") + "\n")
+		for i, t := range m.historyTopTracks {
+			if i >= 10 {
+				break
+			}
+			playLabel := fmt.Sprintf("%d plays", t.PlayCount)
+			sb.WriteString(fmt.Sprintf("  %2d. %-30s  %-20s %s\n", i+1, t.Title, t.Artist, playLabel))
+		}
+	}
+
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(accentColor).
+		Padding(0, 1).Width(cardWidth).Render("📊 HISTORY & STATS  (Esc to go back)\n\n" + sb.String())
 	return box + "\n"
 }
 
@@ -1449,7 +1632,8 @@ func RunMini() error {
 	defer fmt.Print("\x1b[?25h\n")
 
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sig)
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -1466,7 +1650,10 @@ func RunMini() error {
 			} else {
 				line = miniLine(info)
 			}
-			// Overwrite current line (pad to 120 chars to clear leftovers)
+			// Overwrite current line (pad to 120 chars to clear leftovers, truncate if needed)
+			if len(line) > 120 {
+				line = line[:117] + "..."
+			}
 			fmt.Printf("\r%-120s", line)
 		}
 	}

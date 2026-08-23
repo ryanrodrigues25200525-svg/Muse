@@ -1,6 +1,6 @@
 module github.com/ryanrodrigues25200525-svg/Apple-music-cli
 
-go 1.26.4
+go 1.24.2
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0

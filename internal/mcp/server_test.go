@@ -30,7 +30,7 @@ func TestAvailableToolsIncludesExpectedSchemas(t *testing.T) {
 		"repeat_mode", "get_volume", "fade_out", "get_song_info", "get_lyrics",
 		"get_album", "rate_song", "love_song", "dislike_song", "get_recently_played",
 		"top_tracks", "get_recommendations", "radio_mode", "add_to_queue",
-		"add_to_library", "import_playlist",
+		"add_to_library", "import_playlist", "search_filtered",
 	} {
 		if _, ok := names[name]; !ok {
 			t.Fatalf("missing tool %q in %#v", name, names)
@@ -123,6 +123,23 @@ func TestExecuteToolReturnsStructuredSearchJSON(t *testing.T) {
 	}
 }
 
+func TestExecuteToolSearchFilteredReturnsJSON(t *testing.T) {
+	withStubbedMusic(t)
+
+	result, isErr := executeTool("search_filtered", map[string]interface{}{"artist": "Artist"})
+	if isErr {
+		t.Fatalf("executeTool(search_filtered) isErr = true, result = %q", result)
+	}
+
+	var tracks []music.TrackInfo
+	if err := json.Unmarshal([]byte(result), &tracks); err != nil {
+		t.Fatalf("search_filtered result is not JSON: %v\n%s", err, result)
+	}
+	if len(tracks) != 1 || tracks[0].Title != "Song" {
+		t.Fatalf("tracks = %#v", tracks)
+	}
+}
+
 func TestExecuteToolMusicContextIncludesAvailableData(t *testing.T) {
 	withStubbedMusic(t)
 
@@ -160,6 +177,9 @@ func withStubbedMusic(t *testing.T) {
 			}, nil
 		},
 		Search: func(string) ([]music.TrackInfo, error) {
+			return []music.TrackInfo{{Title: "Song", Artist: "Artist", Album: "Album"}}, nil
+		},
+		SearchFiltered: func(string, string, string, string, int, *bool, int, int) ([]music.TrackInfo, error) {
 			return []music.TrackInfo{{Title: "Song", Artist: "Artist", Album: "Album"}}, nil
 		},
 		PlayTrackByName:      func(string) error { return nil },

@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/ryanrodrigues25200525-svg/Apple-music-cli/internal/lyrics"
 	"github.com/ryanrodrigues25200525-svg/Apple-music-cli/internal/music"
@@ -59,6 +62,7 @@ type musicActions struct {
 	NowPlaying                  func() (*music.TrackInfo, error)
 	SetVolume                   func(int) error
 	Search                      func(string) ([]music.TrackInfo, error)
+	SearchFiltered              func(string, string, string, string, int, *bool, int, int) ([]music.TrackInfo, error)
 	PlayTrackByName             func(string) error
 	PlayPlaylist                func(string) error
 	PlayPlaylistShuffled        func(string) error
@@ -82,12 +86,20 @@ type musicActions struct {
 	Seek                        func(float64) error
 	SetPlayerPosition           func(float64) error
 	FadeOut                     func(float64) error
+	FadeIn                      func(float64, int) error
 	PlayAlbumByName             func(string) error
 	AddCurrentTrackToLibrary    func() error
 	GetRecentlyPlayed           func(int) ([]music.TrackInfo, error)
 	GetTopTracks                func(int) ([]music.TrackStats, error)
+	ExportPlaylist              func(string, string) (string, error)
+	ImportPlaylist              func(string, string) error
 	FetchLyrics                 func(string, string, string, float64) ([]lyrics.Line, error)
 }
+
+var (
+	djMu       sync.Mutex
+	responseMu sync.Mutex
+)
 
 var musicAPI = musicActions{
 	Play:                        music.Play,
@@ -99,6 +111,7 @@ var musicAPI = musicActions{
 	NowPlaying:                  music.NowPlaying,
 	SetVolume:                   music.SetVolume,
 	Search:                      music.Search,
+	SearchFiltered:              music.SearchFiltered,
 	PlayTrackByName:             music.PlayTrackByName,
 	PlayPlaylist:                music.PlayPlaylist,
 	PlayPlaylistShuffled:        music.PlayPlaylistShuffled,
@@ -122,14 +135,77 @@ var musicAPI = musicActions{
 	Seek:                        music.Seek,
 	SetPlayerPosition:           music.SetPlayerPosition,
 	FadeOut:                     music.FadeOut,
+	FadeIn:                      music.FadeIn,
 	PlayAlbumByName:             music.PlayAlbumByName,
 	AddCurrentTrackToLibrary:    music.AddCurrentTrackToLibrary,
 	GetRecentlyPlayed:           music.GetRecentlyPlayed,
 	GetTopTracks:                music.GetTopTracks,
+	ExportPlaylist:              music.ExportPlaylist,
+	ImportPlaylist:              music.ImportPlaylist,
 	FetchLyrics:                 lyrics.Fetch,
 }
 
+func startDJMonitor() {
+	go func() {
+		for {
+			idle := music.DJQueueLen() == 0 || music.DjFading
+			if idle {
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			time.Sleep(500 * time.Millisecond)
+
+			info, err := musicAPI.NowPlaying()
+			if err != nil || info == nil {
+				continue
+			}
+
+			if music.DjFading || music.DJQueueLen() == 0 {
+				continue
+			}
+
+			var doTransition bool
+			var fadeTime float64
+			switch {
+			case info.State == "stopped":
+				doTransition = true
+			case info.State == "playing" && info.Duration > 0:
+				left := info.Duration - info.Position
+				if left > 0 && left <= music.DJFadeSecs+1 {
+					doTransition = true
+					fadeTime = left
+				}
+			}
+
+			if !doTransition {
+				continue
+			}
+
+			next, ok := music.DJDequeueNext()
+			if !ok {
+				continue
+			}
+
+			music.DjFading = true
+			origVol, err := musicAPI.GetVolume()
+			if err != nil || origVol <= 0 {
+				origVol = 80
+			}
+			if fadeTime > 0.3 {
+				musicAPI.FadeOut(fadeTime)
+			} else {
+				musicAPI.SetVolume(0)
+			}
+			musicAPI.PlayTrackByName(next.Title)
+			musicAPI.FadeIn(music.DJFadeSecs, origVol)
+
+			music.DjFading = false
+		}
+	}()
+}
+
 func StartServer() {
+	startDJMonitor()
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -719,6 +795,89 @@ func availableTools() []object {
 				"properties": object{},
 			},
 		},
+		{
+			"name":        "search_filtered",
+			"description": "Search the user's music library with filters: artist, album, genre, year, loved status, minimum rating, and optional text query",
+			"inputSchema": object{
+				"type": "object",
+				"properties": object{
+					"query": object{
+						"type":        "string",
+						"description": "Optional text search (matches title, artist, album)",
+					},
+					"artist": object{
+						"type":        "string",
+						"description": "Filter by artist name",
+					},
+					"album": object{
+						"type":        "string",
+						"description": "Filter by album name",
+					},
+					"genre": object{
+						"type":        "string",
+						"description": "Filter by genre",
+					},
+					"year": object{
+						"type":        "integer",
+						"description": "Filter by release year",
+					},
+					"loved": object{
+						"type":        "boolean",
+						"description": "Filter by loved status",
+					},
+					"min_rating": object{
+						"type":        "integer",
+						"description": "Minimum rating (1-5 stars)",
+					},
+					"limit": object{
+						"type":        "integer",
+						"description": "Maximum results to return (1-100, default 50)",
+					},
+				},
+			},
+		},
+		{
+			"name":        "playlist_export",
+			"description": "Export a Music.app playlist's tracks as M3U or JSON content",
+			"inputSchema": object{
+				"type": "object",
+				"properties": object{
+					"name": object{
+						"type":        "string",
+						"description": "The exact name of the playlist to export",
+					},
+					"format": object{
+						"type":        "string",
+						"description": "Export format: \"m3u\" (default) or \"json\"",
+						"enum":        []string{"m3u", "json"},
+					},
+				},
+				"required": []string{"name"},
+			},
+		},
+		{
+			"name":        "playlist_import",
+			"description": "Import tracks from an M3U or JSON file into a Music.app playlist (created if missing)",
+			"inputSchema": object{
+				"type": "object",
+				"properties": object{
+					"name": object{
+						"type":        "string",
+						"description": "Name of the target playlist",
+					},
+					"path_or_content": object{
+						"type":        "string",
+						"description": "File path to an M3U/JSON file, or the raw file content itself",
+					},
+					"format": object{
+						"type":        "string",
+						"description": "File format: \"m3u\" or \"json\". Auto-detected from file extension or content when omitted.",
+						"enum":        []string{"m3u", "json"},
+					},
+				},
+				"required": []string{"name", "path_or_content"},
+			},
+		},
 	}
 }
 
@@ -778,6 +937,33 @@ func executeTool(name string, args map[string]interface{}) (string, bool) {
 			return fmt.Sprintf("Error setting volume: %v", err), true
 		}
 		return fmt.Sprintf("Volume set to %d%%.", vol), false
+
+	case "search_filtered":
+		query, _ := args["query"].(string)
+		artist, _ := args["artist"].(string)
+		album, _ := args["album"].(string)
+		genre, _ := args["genre"].(string)
+		var year int
+		if y, ok := args["year"].(float64); ok {
+			year = int(y)
+		}
+		var loved *bool
+		if l, ok := args["loved"].(bool); ok {
+			loved = &l
+		}
+		var minRating int
+		if r, ok := args["min_rating"].(float64); ok {
+			minRating = int(r)
+		}
+		var limit int
+		if l, ok := args["limit"].(float64); ok {
+			limit = int(l)
+		}
+		results, err := musicAPI.SearchFiltered(query, artist, album, genre, year, loved, minRating, limit)
+		if err != nil {
+			return fmt.Sprintf("Error searching library: %v", err), true
+		}
+		return jsonText(results), false
 
 	case "search":
 		query, ok := args["query"].(string)
@@ -1063,11 +1249,134 @@ func executeTool(name string, args map[string]interface{}) (string, bool) {
 	case "add_to_queue":
 		return "Music.app AppleScript does not expose a reliable Up Next mutation API, so this MCP server cannot add songs to the queue yet.", true
 
+		case "playlist_export":
+		name, ok := args["name"].(string)
+		if !ok || name == "" {
+			return "name argument is required", true
+		}
+		format, _ := args["format"].(string)
+		if format == "" {
+			format = "m3u"
+		}
+		expContent, err := musicAPI.ExportPlaylist(name, format)
+		if err != nil {
+			return fmt.Sprintf("Error exporting playlist: %v", err), true
+		}
+		return expContent, false
+
+	case "playlist_import":
+		name, ok := args["name"].(string)
+		if !ok || name == "" {
+			return "name argument is required", true
+		}
+		pathOrContent, ok := args["path_or_content"].(string)
+		if !ok || pathOrContent == "" {
+			return "path_or_content argument is required", true
+		}
+		if err := musicAPI.ImportPlaylist(name, pathOrContent); err != nil {
+			return fmt.Sprintf("Error importing playlist: %v", err), true
+		}
+		return fmt.Sprintf("Imported tracks into playlist: %s", name), false
+
 	case "import_playlist":
-		return "Playlist import is not implemented in this MCP server yet.", true
+		// Legacy alias: delegates to playlist_import
+		path, ok := args["path"].(string)
+		if !ok || path == "" {
+			return "path argument is required", true
+		}
+		if err := musicAPI.ImportPlaylist("Imported Playlist", path); err != nil {
+			return fmt.Sprintf("Error importing playlist: %v", err), true
+		}
+		return "Playlist imported as 'Imported Playlist'.", false
 
 	case "music_context":
 		return jsonText(buildMusicContext()), false
+
+	case "dj_queue_add":
+		query, ok := args["query"].(string)
+		if !ok || query == "" {
+			return "query argument is required", true
+		}
+		desc, pos, err := music.DJAddToQueue(query)
+		if err != nil {
+			return fmt.Sprintf("%v", err), true
+		}
+		return fmt.Sprintf("Queued: %s (%d in queue)", desc, pos), false
+
+	case "dj_queue_view":
+		q := music.DJGetQueue()
+		if len(q) == 0 {
+			return "DJ queue is empty.", false
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "DJ Queue (%d tracks):\n", len(q))
+		for i, e := range q {
+			fmt.Fprintf(&sb, "%d. %s \u2013 %s\n", i+1, e.Title, e.Artist)
+		}
+		return strings.TrimRight(sb.String(), "\n"), false
+
+	case "dj_queue_clear":
+		if err := music.DJClearQueue(); err != nil {
+			return fmt.Sprintf("Error clearing DJ queue: %v", err), true
+		}
+		return "DJ queue cleared.", false
+
+	case "dj_skip":
+		fadeSecs, _ := args["fade_seconds"].(float64)
+		if fadeSecs <= 0 {
+			fadeSecs = 3
+		}
+		if music.DjFading {
+			return "Transition already in progress.", false
+		}
+		next, ok := music.DJDequeueNext()
+		if !ok {
+			return "DJ queue is empty.", true
+		}
+		music.DjFading = true
+		origVol, err := musicAPI.GetVolume()
+		if err != nil || origVol <= 0 {
+			origVol = 80
+		}
+		musicAPI.FadeOut(fadeSecs)
+		if err := musicAPI.PlayTrackByName(next.Title); err != nil {
+			music.DjFading = false
+			return fmt.Sprintf("Error playing next track: %v", err), true
+		}
+		musicAPI.FadeIn(fadeSecs, origVol)
+		music.DjFading = false
+		return fmt.Sprintf("Now playing: %s \u2013 %s", next.Title, next.Artist), false
+
+	case "queue_add":
+		query, ok := args["query"].(string)
+		if !ok || query == "" {
+			return "query argument is required", true
+		}
+		desc, pos, err := music.DJAddToQueue(query)
+		if err != nil {
+			return fmt.Sprintf("%v", err), true
+		}
+		return fmt.Sprintf("Queued: %s (%d in queue)", desc, pos), false
+
+	case "queue_clear":
+		if err := music.DJClearQueue(); err != nil {
+			return fmt.Sprintf("Error clearing queue: %v", err), true
+		}
+		return "Queue cleared.", false
+
+	case "queue_move":
+		from, ok := intArg(args, "from")
+		if !ok {
+			return "from argument is required and must be a positive integer", true
+		}
+		to, ok := intArg(args, "to")
+		if !ok {
+			return "to argument is required and must be a positive integer", true
+		}
+		if err := music.DJMoveQueueItem(from, to); err != nil {
+			return fmt.Sprintf("Error moving queue item: %v", err), true
+		}
+		return fmt.Sprintf("Moved item from position %d to %d.", from, to), false
 
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name), true

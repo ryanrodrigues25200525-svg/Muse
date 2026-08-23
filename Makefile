@@ -1,6 +1,7 @@
 .PHONY: build run clean test install
 
-GO_BIN ?= /opt/homebrew/bin/go
+GO ?= go
+GO_BIN ?= $(GO)
 BINARY_NAME = mu
 VERSION ?= dev
 LDFLAGS = -X github.com/ryanrodrigues25200525-svg/Apple-music-cli/cmd.Version=$(VERSION)
