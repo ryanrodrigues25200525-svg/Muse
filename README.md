@@ -17,7 +17,7 @@ Muse is a terminal controller for Apple Music on macOS. It provides a fast CLI, 
 ## Quick Start
 
 ```sh
-brew tap ryanrodrigues25200525-svg/homebrew-tap
+brew tap ryanrodrigues25200525-svg/muse https://github.com/ryanrodrigues25200525-svg/Muse.git
 brew install muse
 mu doctor
 mu
@@ -42,7 +42,7 @@ Muse requires macOS, Music.app, and AppleScript Automation permission for your t
 ### Homebrew
 
 ```sh
-brew tap ryanrodrigues25200525-svg/homebrew-tap
+brew tap ryanrodrigues25200525-svg/muse https://github.com/ryanrodrigues25200525-svg/Muse.git
 brew install muse
 ```
 
