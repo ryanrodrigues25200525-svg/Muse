@@ -31,6 +31,22 @@ test("parseRecord keeps newlines inside a field rather than flattening them", ()
   expect(parseRecord("two\nlines\u001fb")).toEqual(["two\nlines", "b"])
 })
 
+test("parseRecord preserves pipes inside a field", () => {
+  // Pipe is the LEGACY row separator. The record format must not be
+  // confused by it, which is why new AppleScript must emit RECORD_SEP.
+  expect(parseRecord("a|b\u001fc|d")).toEqual(["a|b", "c|d"])
+})
+
+test("parseRecord preserves quotes and backslashes inside a field", () => {
+  expect(parseRecord('he said "hi" \\ bye\u001fb')).toEqual(['he said "hi" \\ bye', "b"])
+})
+
+test("parseRows cannot represent a pipe inside a field (legacy limitation)", () => {
+  // Documents the constraint rather than hiding it: the pipe format splits on
+  // "|", so any AppleScript emitting it must escape or replace pipes.
+  expect(parseRows("a|b|c|d", "|")).toEqual([["a", "b", "c", "d"]])
+})
+
 test("parseRows splits newline-separated rows on the given separator", () => {
   expect(parseRows("a|b|c\nd|e|f", "|")).toEqual([
     ["a", "b", "c"],

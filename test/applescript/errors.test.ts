@@ -16,6 +16,19 @@ test("parseOsascriptError extracts the osascript error number", () => {
   expect(parseOsascriptError("execution error: whatever (-1234)").osascriptNumber).toBe(1234)
 })
 
+test("parseOsascriptError handles the real LINE:COL prefix osascript emits", () => {
+  // This is the exact shape observed from `osascript -e 'error "boom" number -1728'`.
+  const parsed = parseOsascriptError("6:12: execution error: boom (-1728)")
+  expect(parsed.osascriptNumber).toBe(1728)
+  expect(parsed.message).toBe("boom (-1728)")
+  expect(parsed.rawOutput).toBe("6:12: execution error: boom (-1728)")
+})
+
+test("parseOsascriptError reads the number from the last non-empty line", () => {
+  const parsed = parseOsascriptError("first line\n9:1: script error: bad (-1700)\n\n")
+  expect(parsed.osascriptNumber).toBe(1700)
+})
+
 test("parseOsascriptError returns null when there is no error number", () => {
   expect(parseOsascriptError("command not found").osascriptNumber).toBeNull()
 })

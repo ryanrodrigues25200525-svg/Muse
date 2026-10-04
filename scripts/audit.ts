@@ -54,6 +54,37 @@ async function osascript(script: string): Promise<string> {
   }
 }
 
+/**
+ * Read the current track's loved state. Uses the multi-line if/else form:
+ * a single-line `if … then … else …` is a syntax error in AppleScript
+ * (audit finding P2). Returns "stopped", "unsupported", or "true"/"false".
+ */
+async function readLovedState(): Promise<string> {
+  return osascript(`
+tell application "Music"
+  if player state is stopped then
+    return "stopped"
+  else
+    try
+      return (loved of current track) as string
+    on error
+      return "unsupported"
+    end try
+  end if
+end tell
+`)
+}
+
+/** Read the clipboard, distinguishing an empty clipboard from a failed read. */
+async function readClipboard(): Promise<string | null> {
+  const proc = Bun.spawn(["pbpaste"], { stdout: "pipe", stderr: "pipe" })
+  const [out, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ])
+  return code === 0 ? out : null
+}
+
 async function sh(cmd: string[]): Promise<string> {
   try {
     const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" })
@@ -76,13 +107,11 @@ async function probe(command: string, ...argLists: string[][]): Promise<void> {
 }
 
 // ── Save state so the audit leaves Music.app as it found it ────────────────
-const clipboardBefore = await sh(["pbpaste"])
+const clipboardBefore = await readClipboard()
 const volumeBefore = (await runOracle("volume", ["volume"])).stdout.replace(/\D+/g, "")
 const shuffleBefore = await osascript('tell application "Music" to get shuffle enabled')
 const repeatBefore = await osascript('tell application "Music" to get song repeat')
-const lovedBefore = await osascript(
-  'tell application "Music" to if player state is stopped then return "stopped" else return (loved of current track) as string end if',
-)
+const lovedBefore = await readLovedState()
 const restoreLog: string[] = []
 
 // ── Command matrix: all 24 commands ────────────────────────────────────────
@@ -236,6 +265,16 @@ probes.push({
     "volume 0 stderr": (await runOracle("volume", ["volume", "0"])).stderr || "(none)",
     "seek 10 (unsigned)": (await runOracle("seek", ["seek", "10"])).stderr || "(accepted, exit 0)",
     "sleep 0": (await runOracle("sleep", ["sleep", "0"])).stderr || "(none)",
+    // The CLI exposes no `rate` command; the documented 1-5 rating range lives
+    // on `search --min-rating`, so that is where a 6-star input must be probed.
+    "search --min-rating 6": (await runOracle("search", ["search", "a", "--min-rating", "6", "--limit", "2"]))
+      .stderr || "(accepted, exit 0)",
+    "search --min-rating 5": (await runOracle("search", ["search", "a", "--min-rating", "5", "--limit", "2"]))
+      .stderr || "(accepted, exit 0)",
+    "search --min-rating 0": (await runOracle("search", ["search", "a", "--min-rating", "0", "--limit", "2"]))
+      .stderr || "(accepted, exit 0)",
+    "search --limit 0": (await runOracle("search", ["search", "a", "--limit", "0"])).stderr || "(accepted, exit 0)",
+    "search --limit 101": (await runOracle("search", ["search", "a", "--limit", "101"])).stderr || "(accepted, exit 0)",
   },
 })
 
@@ -260,17 +299,26 @@ if (repeatBefore && !repeatBefore.startsWith("THREW")) {
   )
 }
 
-const lovedNow = await osascript(
-  'tell application "Music" to if player state is stopped then return "stopped" else return (loved of current track) as string end if',
-)
-if (lovedNow !== lovedBefore && lovedNow !== "stopped") {
+const lovedNow = await readLovedState()
+if (
+  lovedBefore !== "unsupported" &&
+  lovedNow !== "stopped" &&
+  lovedNow !== "unsupported" &&
+  lovedNow !== lovedBefore
+) {
   await runOracle("love", ["love"])
   restoreLog.push(`loved toggled back (was ${lovedBefore}, found ${lovedNow})`)
+} else {
+  restoreLog.push(`loved left as-is (was ${lovedBefore}, now ${lovedNow})`)
 }
-if (clipboardBefore && clipboardBefore !== "THREW:") {
+// Restore even an empty clipboard: `clipboardBefore !== null` separates
+// "clipboard was empty" from "the read failed".
+if (clipboardBefore !== null) {
   const proc = Bun.spawn(["pbcopy"], { stdin: new Blob([clipboardBefore]).stream() })
   await proc.exited
-  restoreLog.push("clipboard restored")
+  restoreLog.push(`clipboard restored (${clipboardBefore.length} bytes)`)
+} else {
+  restoreLog.push("clipboard read failed; left unchanged")
 }
 await runOracle("pause", ["pause"])
 restoreLog.push("playback paused")
@@ -287,7 +335,7 @@ const environment = {
     shuffle: shuffleBefore,
     repeat: repeatBefore,
     loved: lovedBefore,
-    clipboardBytes: clipboardBefore.length,
+    clipboardBytes: clipboardBefore === null ? "read failed" : clipboardBefore.length,
   },
 }
 

@@ -1,4 +1,4 @@
-import { AppleScriptError } from "./errors"
+import { parseOsascriptError } from "./errors"
 
 /**
  * The single seam through which Muse reaches Music.app. Every AppleScript
@@ -23,8 +23,10 @@ export function createOsascriptRunner(): ScriptRunner {
       ])
 
       if (exitCode !== 0) {
-        const trimmed = stderr.trim()
-        throw new AppleScriptError(trimmed, trimmed)
+        // Parse here, at the only place real osascript output enters the
+        // system, so every downstream caller can dispatch on the error number
+        // instead of printing raw AppleScript text.
+        throw parseOsascriptError(stderr)
       }
       return stdout.trim()
     },

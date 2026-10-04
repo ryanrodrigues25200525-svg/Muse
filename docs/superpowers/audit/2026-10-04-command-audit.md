@@ -246,6 +246,18 @@ error and no playback.
 | `seek 10` (unsigned) | `seek value must include a sign…` | correct |
 | `sleep 0` / `sleep abc` | `Please provide a positive number of minutes.` | correct |
 | `playlist import … /dev/null` | clean rejection, no playlist created | correct |
+| `search --min-rating 6` | exit 0, `No tracks found.` | **wrong** — documented range is 1–5 |
+| `search --min-rating 5` | exit 0, `No tracks found.` | correct |
+| `search --min-rating 0` | exit 0, returns results | correct — 0 means "no filter" |
+| `search --limit 0` | exit 0, returns **50** results | **wrong** — documented range is 1–100 |
+| `search --limit 101` | exit 0, returns **50** results | **wrong** — documented range is 1–100 |
+
+There is no CLI `rate` command, so a "6-star rating" has no rating surface to probe;
+the documented 1–5 range lives on `search --min-rating`, which is what the rows above
+exercise. Out-of-range `--min-rating` and `--limit` values are **silently ignored** and
+the default is used, rather than being rejected with a message. That is the same class
+of defect as the negative-argument parsing below: documented validation that never runs.
+Recorded as R11.
 
 The defect is not validation logic but argument parsing: any argument beginning with
 `-` followed by a digit is consumed as a flag by pflag, so `volume -1`, `seek -5`, and
@@ -279,6 +291,7 @@ origin of the defect.
 | R8 | `love` | fails on tracks where `loved` is unsupported | keep the accurate message; document the limitation in README | `controller.go:433` | new |
 | R9 | `sleep` | help text and README never state that the argument is minutes | document the unit in the command help and README | `commands.go:645` | item 6 |
 | R10 | `lyrics`, `art` | implemented in Go, unreachable from the CLI | expose `mu lyrics` and `mu art` so the ported code is not dead | `internal/lyrics`, `internal/art` | item 7 |
+| R11 | `search` | out-of-range `--min-rating` and `--limit` values are silently ignored and the default is used, despite documented ranges of 1–5 and 1–100 | validate both flags at the CLI boundary and reject with a message naming the valid range | `commands.go:49` flags | new |
 
 ## Porting constraints discovered
 

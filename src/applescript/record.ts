@@ -14,11 +14,15 @@ export function parseRecord(output: string): string[] {
 }
 
 /**
- * Split newline-separated rows into fields. Blank lines are dropped so a
- * trailing newline in osascript output does not produce an empty row.
+ * Split newline-separated rows into fields, using the legacy `|` separator.
  *
- * The default separator matches Go's `parseTrackLines`, which delimits each
- * row's fields with `|`.
+ * LEGACY FORMAT — CONSTRAINT: a field cannot contain `|` or a newline,
+ * because both are structural here. Any AppleScript emitting this format must
+ * escape or strip them, or the row will parse into extra fields.
+ *
+ * New AppleScript must emit RECORD_SEP-joined single records and be read with
+ * `parseRecord`, which has no such limitation. This mirrors Go's
+ * `parseTrackLines`, kept only so existing pipe-format callers have a parser.
  */
 export function parseRows(output: string, sep = "|"): string[][] {
   return output

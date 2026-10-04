@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { AppleScriptError } from "../../src/applescript/errors"
+import { AppleScriptError, friendlyMessage } from "../../src/applescript/errors"
 import { createOsascriptRunner } from "../../src/applescript/runner"
 
 // Every test here shells out to the real osascript binary.
@@ -32,5 +32,22 @@ describeMac("createOsascriptRunner", () => {
     }
     expect(caught).toBeInstanceOf(AppleScriptError)
     expect((caught as AppleScriptError).rawOutput).toContain("boom")
+  })
+
+  test("runner errors carry a parsed number, so friendlyMessage can dispatch", async () => {
+    // The transport is the only place real osascript failures enter the
+    // system. If it does not parse the number, every command downstream
+    // falls back to printing raw AppleScript text.
+    const runner = createOsascriptRunner()
+    let caught: unknown
+    try {
+      await runner.run('error "Not authorized to send Apple events to Music." number -1743')
+      throw new Error("expected run to reject, but it resolved")
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(AppleScriptError)
+    expect((caught as AppleScriptError).osascriptNumber).toBe(1743)
+    expect(friendlyMessage(caught)).toContain("Privacy & Security")
   })
 })
