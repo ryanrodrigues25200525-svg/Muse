@@ -39,17 +39,8 @@ snapshot:
 changelog:
   sort: asc
 
-brews:
-  - name: muse
-    ids:
-      - default
-    repository:
-      owner: ryanrodrigues25200525-svg
-      name: homebrew-tap
-    homepage: "https://github.com/ryanrodrigues25200525-svg/Apple-music-cli"
-    description: "CLI, TUI, and MCP controller for Apple Music on macOS"
-    license: "MIT"
-    install: |
-      bin.install "mu"
-    test: |
-      system "#{bin}/mu", "version"
+# Homebrew formula: maintained in this repository at Formula/muse.rb, not
+# generated here. The former `brews` block pointed at the homebrew-tap repo,
+# which no longer exists, and GoReleaser deprecated `brews` in v2.16 in favour
+# of casks. This project installs a plain CLI binary, so the in-repo formula is
+# the right mechanism; update its url and sha256 after each release.
