@@ -1,0 +1,15 @@
+{
+  "name": "muse",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "bun test",
+    "test:live": "MUSE_LIVE=1 bun test",
+    "typecheck": "tsc --noEmit",
+    "audit": "bun run scripts/audit.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}
