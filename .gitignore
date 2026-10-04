@@ -23,3 +23,6 @@ coverage.html
 # TypeScript port scratch output
 node_modules/
 audit-out/
+
+# SDD scratch workspace
+.superpowers/
