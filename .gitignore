@@ -16,3 +16,10 @@ coverage.html
 # Local env/config
 .env
 .env.*
+
+# Git worktrees
+.worktrees/
+
+# TypeScript port scratch output
+node_modules/
+audit-out/
